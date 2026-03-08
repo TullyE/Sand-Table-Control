@@ -77,30 +77,6 @@
             flex: 1;
         }
 
-        .ip-input-group {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-        }
-
-        .ip-input-group input {
-            flex: 1;
-            padding: 10px 12px;
-            border: 2px solid #ddd;
-            border-radius: 8px;
-            font-size: 14px;
-            transition: border-color 0.3s ease;
-        }
-
-        .ip-input-group input:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-
-        .ip-input-group input::placeholder {
-            color: #999;
-        }
-
         .button-group {
             display: flex;
             gap: 10px;
@@ -148,6 +124,7 @@
         .control-section {
             display: flex;
             gap: 15px;
+            margin-bottom: 20px;
         }
 
         .btn-blink {
@@ -186,7 +163,7 @@
             margin-top: 20px;
             font-size: 13px;
             color: #333;
-            max-height: 100px;
+            max-height: 150px;
             overflow-y: auto;
             font-family: 'Monaco', 'Courier New', monospace;
         }
@@ -202,12 +179,25 @@
             border-left-color: #10b981;
             color: #166534;
         }
+
+        .status-info {
+            background: #f9fafb;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 15px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .status-info strong {
+            color: #333;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎯 Sand Table Control</h1>
-        <p class="subtitle">Connect to your local ESP32</p>
+        <p class="subtitle">Connect via Bluetooth</p>
 
         <div class="connection-section">
             <div class="connection-label">
@@ -215,30 +205,26 @@
                 <span class="status-text" id="statusText">Disconnected</span>
             </div>
 
-            <div class="ip-input-group">
-                <input 
-                    type="text" 
-                    id="espIP" 
-                    placeholder="192.168.1.50" 
-                    value="192.168.1.50"
-                >
-            </div>
-
             <div class="button-group">
-                <button class="btn-connect" id="connectBtn" onclick="connect()">
-                    Connect
+                <button class="btn-connect" id="connectBtn" onclick="connectBluetooth()">
+                    🔍 Scan & Connect
                 </button>
                 <button class="btn-disconnect" id="disconnectBtn" onclick="disconnect()" disabled>
                     Disconnect
                 </button>
             </div>
+
+            <div class="status-info" id="statusInfo" style="display: none;">
+                <strong>Device:</strong> <span id="deviceName">—</span><br>
+                <strong>Signal:</strong> <span id="deviceRSSI">—</span>
+            </div>
         </div>
 
         <div class="control-section" id="controlSection" style="display: none;">
-            <button class="btn-blink" id="blinkBtn" onclick="startBlink()">
+            <button class="btn-blink" id="blinkBtn" onclick="sendCommand('start_blink')">
                 ✨ Start Blink
             </button>
-            <button class="btn-stop" id="stopBtn" onclick="stopBlink()">
+            <button class="btn-stop" id="stopBtn" onclick="sendCommand('stop_blink')">
                 ⏹ Stop Blink
             </button>
         </div>
@@ -247,14 +233,24 @@
     </div>
 
     <script>
-        let ws = null;
+        let bluetoothDevice = null;
+        let characteristicTx = null;  // For sending commands
+        let characteristicRx = null;  // For receiving status
+
+        // BLE UUIDs (these must match ESP32)
+        const SERVICE_UUID = '12345678-1234-1234-1234-123456789012';
+        const TX_CHAR_UUID = '11111111-1111-1111-1111-111111111111';  // Send commands to ESP32
+        const RX_CHAR_UUID = '22222222-2222-2222-2222-222222222222';  // Receive from ESP32
+
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
-        const espIPInput = document.getElementById('espIP');
         const controlSection = document.getElementById('controlSection');
         const messageBox = document.getElementById('messageBox');
+        const statusInfo = document.getElementById('statusInfo');
+        const deviceNameSpan = document.getElementById('deviceName');
+        const deviceRSSISpan = document.getElementById('deviceRSSI');
 
         function log(message, type = 'info') {
             const timestamp = new Date().toLocaleTimeString();
@@ -262,7 +258,6 @@
             messageBox.innerHTML += entry + '<br>';
             messageBox.scrollTop = messageBox.scrollHeight;
 
-            // Color the message
             if (type === 'error') {
                 messageBox.classList.add('error');
                 messageBox.classList.remove('success');
@@ -273,85 +268,108 @@
                 messageBox.classList.remove('error', 'success');
             }
 
-            // Keep only last 10 messages
             const lines = messageBox.innerHTML.split('<br>');
-            if (lines.length > 12) {
-                messageBox.innerHTML = lines.slice(-10).join('<br>');
+            if (lines.length > 15) {
+                messageBox.innerHTML = lines.slice(-12).join('<br>');
             }
         }
 
-        function connect() {
-            const ip = espIPInput.value.trim();
-            if (!ip) {
-                log('Please enter ESP32 IP address', 'error');
-                return;
-            }
+        async function connectBluetooth() {
+            try {
+                log('Scanning for ESP32 devices...', 'info');
 
-            const wsURL = `ws://${ip}:81`;
-            log(`Connecting to ${wsURL}...`, 'info');
+                bluetoothDevice = await navigator.bluetooth.requestDevice({
+                    filters: [
+                        { namePrefix: 'ESP32' },
+                        { namePrefix: 'SandTable' }
+                    ],
+                    optionalServices: [SERVICE_UUID]
+                });
 
-            ws = new WebSocket(wsURL);
+                log(`Found device: ${bluetoothDevice.name}`, 'info');
+                deviceNameSpan.textContent = bluetoothDevice.name;
+                deviceRSSISpan.textContent = bluetoothDevice.rssi ? `${bluetoothDevice.rssi} dBm` : 'N/A';
+                statusInfo.style.display = 'block';
 
-            ws.onopen = () => {
+                bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                log('Connecting to GATT server...', 'info');
+                const server = await bluetoothDevice.gatt.connect();
+
+                log('Getting service...', 'info');
+                const service = await server.getPrimaryService(SERVICE_UUID);
+
+                log('Getting characteristics...', 'info');
+                characteristicTx = await service.getCharacteristic(TX_CHAR_UUID);
+                characteristicRx = await service.getCharacteristic(RX_CHAR_UUID);
+
+                // Listen for notifications from ESP32
+                await characteristicRx.startNotifications();
+                characteristicRx.addEventListener('characteristicvaluechanged', onCharacteristicValueChanged);
+
                 log('Connected to ESP32! ✅', 'success');
                 statusDot.classList.add('connected');
                 statusText.textContent = 'Connected';
                 connectBtn.disabled = true;
                 disconnectBtn.disabled = false;
-                espIPInput.disabled = true;
                 controlSection.style.display = 'flex';
-            };
 
-            ws.onmessage = (event) => {
-                log(`Received: ${event.data}`, 'info');
-                const data = JSON.parse(event.data);
-                if (data.status) {
-                    log(`Status: ${data.status}`, 'success');
-                }
-            };
-
-            ws.onerror = (error) => {
-                log(`WebSocket error: ${error}`, 'error');
-            };
-
-            ws.onclose = () => {
-                log('Disconnected from ESP32 ❌', 'error');
+            } catch (error) {
+                log(`Connection error: ${error.message}`, 'error');
                 statusDot.classList.remove('connected');
                 statusText.textContent = 'Disconnected';
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
-                espIPInput.disabled = false;
-                controlSection.style.display = 'none';
-                ws = null;
-            };
+            }
+        }
+
+        function onDisconnected() {
+            log('Disconnected from ESP32 ❌', 'error');
+            statusDot.classList.remove('connected');
+            statusText.textContent = 'Disconnected';
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            controlSection.style.display = 'none';
+            statusInfo.style.display = 'none';
+            bluetoothDevice = null;
+            characteristicTx = null;
+            characteristicRx = null;
+        }
+
+        function onCharacteristicValueChanged(event) {
+            const value = event.target.value;
+            const message = new TextDecoder().decode(value);
+            log(`Received: ${message}`, 'success');
+        }
+
+        async function sendCommand(command) {
+            if (!characteristicTx) {
+                log('Not connected to ESP32', 'error');
+                return;
+            }
+
+            try {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(command);
+                await characteristicTx.writeValue(data);
+                log(`Sent: ${command}`, 'info');
+            } catch (error) {
+                log(`Send error: ${error.message}`, 'error');
+            }
         }
 
         function disconnect() {
-            if (ws) {
-                ws.close();
+            if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+                bluetoothDevice.gatt.disconnect();
+                onDisconnected();
             }
         }
 
-        function startBlink() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('start_blink');
-                log('Sent: start_blink', 'info');
-            } else {
-                log('Not connected to ESP32', 'error');
-            }
+        // Check if Web Bluetooth is supported
+        if (!navigator.bluetooth) {
+            log('Web Bluetooth not supported on this device', 'error');
+            connectBtn.disabled = true;
+        } else {
+            log('Ready to connect', 'success');
         }
-
-        function stopBlink() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('stop_blink');
-                log('Sent: stop_blink', 'info');
-            } else {
-                log('Not connected to ESP32', 'error');
-            }
-        }
-
-        // Log initial message
-        log('Ready to connect', 'success');
     </script>
 </body>
 </html>
